@@ -1,0 +1,433 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bedrock Invocation Logging & Athena Analytics - One-click deployment for
+  monitoring token usage and cost across Bedrock models.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: S3 Storage Configuration
+        Parameters:
+          - UseExistingBucket
+          - ExistingBucketName
+          - LogPrefix
+          - LogRetentionDays
+      - Label:
+          default: Athena Configuration
+        Parameters:
+          - AthenaDbName
+    ParameterLabels:
+      UseExistingBucket:
+        default: Use an existing S3 bucket?
+      ExistingBucketName:
+        default: Existing S3 bucket name
+      LogPrefix:
+        default: S3 key prefix for Bedrock logs
+      LogRetentionDays:
+        default: Log retention period (days)
+      AthenaDbName:
+        default: Athena database name
+
+Parameters:
+  UseExistingBucket:
+    Type: String
+    Default: 'No'
+    AllowedValues: ['Yes', 'No']
+    Description: Choose Yes to use an existing bucket, No to create a new one.
+
+  ExistingBucketName:
+    Type: String
+    Default: ''
+    Description: Required if UseExistingBucket=Yes. The bucket must allow Bedrock to PutObject.
+
+  LogPrefix:
+    Type: String
+    Default: bedrock/invocation-logs/
+    Description: S3 key prefix for invocation logs.
+    AllowedPattern: '^[a-zA-Z0-9!_.*()-/]+/$'
+
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 30
+    MaxValue: 3650
+    Description: Days before logs expire (only applies to newly created bucket).
+
+  AthenaDbName:
+    Type: String
+    Default: bedrock_analytics
+    AllowedPattern: '^[a-z_][a-z0-9_]*$'
+    Description: Athena database name (lowercase, underscores only).
+
+Conditions:
+  CreateNewBucket: !Equals [!Ref UseExistingBucket, 'No']
+  UseExisting: !Not [!Condition CreateNewBucket]
+
+Resources:
+  # ============================================================
+  # S3 Bucket (conditional)
+  # ============================================================
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateNewBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub central-logs-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Prefix: !Ref LogPrefix
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+            ExpirationInDays: !Ref LogRetentionDays
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateNewBucket
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowBedrockLogging
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${LogsBucket}/${LogPrefix}*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # ============================================================
+  # Bedrock Invocation Logging
+  # ============================================================
+  # Bedrock logging config via Custom Resource (no native CFN support)
+  BedrockLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockLoggingSetup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:PutModelInvocationLoggingConfiguration
+                  - bedrock:GetModelInvocationLoggingConfiguration
+                  - bedrock:DeleteModelInvocationLoggingConfiguration
+                Resource: '*'
+
+  BedrockLoggingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-bedrock-logging-setup
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt BedrockLoggingRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  client = boto3.client('bedrock')
+                  rt = event['RequestType']
+                  props = event['ResourceProperties']
+                  if rt in ('Create', 'Update'):
+                      client.put_model_invocation_logging_configuration(
+                          loggingConfig={
+                              's3Config': {
+                                  'bucketName': props['BucketName'],
+                                  'keyPrefix': props['KeyPrefix']
+                              },
+                              'textDataDeliveryEnabled': True,
+                              'imageDataDeliveryEnabled': True,
+                              'embeddingDataDeliveryEnabled': True
+                          }
+                      )
+                  elif rt == 'Delete':
+                      client.delete_model_invocation_logging_configuration()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  BedrockLogging:
+    Type: Custom::BedrockLogging
+    Properties:
+      ServiceToken: !GetAtt BedrockLoggingFunction.Arn
+      BucketName: !If [CreateNewBucket, !Ref LogsBucket, !Ref ExistingBucketName]
+      KeyPrefix: !Ref LogPrefix
+
+  # ============================================================
+  # Athena Resources
+  # ============================================================
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-workgroup
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub
+            - s3://${Bucket}/athena-results/
+            - Bucket: !If [CreateNewBucket, !Ref LogsBucket, !Ref ExistingBucketName]
+        EnforceWorkGroupConfiguration: false
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240  # 10GB safety limit
+
+  AthenaDatabase:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-create-database
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: default
+      Description: Create the Bedrock analytics database
+      QueryString: !Sub CREATE DATABASE IF NOT EXISTS ${AthenaDbName}
+
+  AthenaTable:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-create-table
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Create partitioned invocation_logs table with partition projection
+      QueryString: !Sub
+        - |
+          CREATE EXTERNAL TABLE IF NOT EXISTS invocation_logs (
+            timestamp string,
+            accountId string,
+            region string,
+            requestId string,
+            operation string,
+            modelId string,
+            input struct<
+              inputContentType:string,
+              inputTokenCount:int,
+              inputBodyJson:struct<
+                messages:array<struct<role:string, content:array<struct<text:string>>>>,
+                inferenceConfig:struct<maxTokens:int>
+              >
+            >,
+            output struct<
+              outputContentType:string,
+              outputTokenCount:int,
+              outputBodyJson:struct<
+                output:struct<message:struct<role:string, content:array<struct<text:string>>>>,
+                stopReason:string,
+                usage:struct<inputTokens:int, outputTokens:int, totalTokens:int>,
+                metrics:struct<latencyMs:int>
+              >
+            >,
+            identity struct<arn:string>,
+            schemaType string,
+            schemaVersion string
+          )
+          PARTITIONED BY (datehour string)
+          ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+          WITH SERDEPROPERTIES ('ignore.malformed.json'='true')
+          LOCATION 's3://${Bucket}/${Prefix}AWSLogs/${AWS::AccountId}/BedrockModelInvocationLogs/${AWS::Region}/'
+          TBLPROPERTIES (
+            'projection.enabled'='true',
+            'projection.datehour.type'='date',
+            'projection.datehour.format'='yyyy/MM/dd/HH',
+            'projection.datehour.range'='2024/01/01/00,NOW',
+            'projection.datehour.interval'='1',
+            'projection.datehour.interval.unit'='HOURS',
+            'storage.location.template'='s3://${Bucket}/${Prefix}AWSLogs/${AWS::AccountId}/BedrockModelInvocationLogs/${AWS::Region}/${!datehour}/'
+          )
+        - Bucket: !If [CreateNewBucket, !Ref LogsBucket, !Ref ExistingBucketName]
+          Prefix: !Ref LogPrefix
+
+  # ============================================================
+  # Athena Saved Queries
+  # ============================================================
+  QueryTokenByModel:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-token-usage-by-model
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Token usage and latency grouped by model
+      QueryString: |
+        SELECT
+          modelId,
+          count(*) as invocations,
+          sum(input.inputTokenCount) as input_tokens,
+          sum(output.outputTokenCount) as output_tokens,
+          sum(input.inputTokenCount) + sum(output.outputTokenCount) as total_tokens,
+          round(avg(output.outputBodyJson.metrics.latencyMs)) as avg_latency_ms
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H')
+        GROUP BY modelId
+        ORDER BY total_tokens DESC
+
+  QueryCostByModel:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-estimated-cost-by-model
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Estimated cost by model (update unit prices as needed)
+      QueryString: |
+        SELECT
+          modelId,
+          count(*) as invocations,
+          sum(input.inputTokenCount) as input_tokens,
+          sum(output.outputTokenCount) as output_tokens,
+          ROUND(
+            sum(input.inputTokenCount) * CASE
+              WHEN modelId LIKE '%claude-3-haiku%'    THEN 0.00025
+              WHEN modelId LIKE '%claude-3-5-haiku%'  THEN 0.001
+              WHEN modelId LIKE '%claude-3-5-sonnet%' THEN 0.003
+              WHEN modelId LIKE '%claude-3-opus%'     THEN 0.015
+              WHEN modelId LIKE '%llama3-8b%'         THEN 0.0003
+              WHEN modelId LIKE '%llama3-70b%'        THEN 0.00265
+              WHEN modelId LIKE '%mistral-7b%'        THEN 0.00015
+              ELSE 0.001
+            END / 1000
+            +
+            sum(output.outputTokenCount) * CASE
+              WHEN modelId LIKE '%claude-3-haiku%'    THEN 0.00125
+              WHEN modelId LIKE '%claude-3-5-haiku%'  THEN 0.005
+              WHEN modelId LIKE '%claude-3-5-sonnet%' THEN 0.015
+              WHEN modelId LIKE '%claude-3-opus%'     THEN 0.075
+              WHEN modelId LIKE '%llama3-8b%'         THEN 0.0006
+              WHEN modelId LIKE '%llama3-70b%'        THEN 0.0035
+              WHEN modelId LIKE '%mistral-7b%'        THEN 0.0002
+              ELSE 0.005
+            END / 1000
+          , 6) as estimated_cost_usd
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -30, now()), '%Y/%m/%d/%H')
+        GROUP BY modelId
+        ORDER BY estimated_cost_usd DESC
+
+  QueryByCaller:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-usage-by-caller
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Token usage by IAM caller for cost allocation
+      QueryString: |
+        SELECT
+          identity.arn as caller,
+          modelId,
+          count(*) as invocations,
+          sum(input.inputTokenCount) + sum(output.outputTokenCount) as total_tokens
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H')
+        GROUP BY identity.arn, modelId
+        ORDER BY total_tokens DESC
+
+  QueryHourlyTrend:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-hourly-trend
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Hourly invocation and token trend
+      QueryString: |
+        SELECT
+          datehour as hour,
+          count(*) as invocations,
+          sum(input.inputTokenCount) as input_tokens,
+          sum(output.outputTokenCount) as output_tokens,
+          round(avg(output.outputBodyJson.metrics.latencyMs)) as avg_latency_ms
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -1, now()), '%Y/%m/%d/%H')
+        GROUP BY datehour
+        ORDER BY datehour DESC
+
+  QueryDailyTrend:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-daily-trend
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Daily invocation and token trend
+      QueryString: |
+        SELECT
+          substr(datehour, 1, 10) as date,
+          count(*) as invocations,
+          sum(input.inputTokenCount) as input_tokens,
+          sum(output.outputTokenCount) as output_tokens
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -30, now()), '%Y/%m/%d/%H')
+        GROUP BY substr(datehour, 1, 10)
+        ORDER BY date DESC
+
+  QueryHighLatency:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub ${AWS::StackName}-high-latency-calls
+      WorkGroup: !Ref AthenaWorkgroup
+      Database: !Ref AthenaDbName
+      Description: Calls with latency over 5 seconds
+      QueryString: |
+        SELECT
+          timestamp,
+          modelId,
+          operation,
+          input.inputTokenCount as input_tokens,
+          output.outputTokenCount as output_tokens,
+          output.outputBodyJson.metrics.latencyMs as latency_ms,
+          identity.arn as caller
+        FROM invocation_logs
+        WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H')
+          AND output.outputBodyJson.metrics.latencyMs > 5000
+        ORDER BY latency_ms DESC
+
+Outputs:
+  BucketName:
+    Description: S3 bucket storing Bedrock invocation logs
+    Value: !If [CreateNewBucket, !Ref LogsBucket, !Ref ExistingBucketName]
+
+  LogLocation:
+    Description: Full S3 path for invocation logs
+    Value: !Sub
+      - s3://${Bucket}/${Prefix}
+      - Bucket: !If [CreateNewBucket, !Ref LogsBucket, !Ref ExistingBucketName]
+        Prefix: !Ref LogPrefix
+
+  AthenaWorkgroupName:
+    Description: Athena workgroup for running queries
+    Value: !Ref AthenaWorkgroup
+
+  AthenaDatabaseName:
+    Description: Athena database name
+    Value: !Ref AthenaDbName
+
+  DeploymentGuide:
+    Description: Post-deployment steps
+    Value: >
+      1. Go to Athena console, select the workgroup created by this stack.
+      2. Run the 'create-database' saved query first.
+      3. Run the 'create-table' saved query to create the partitioned table.
+      4. Use the other saved queries to analyze Bedrock usage and costs.
