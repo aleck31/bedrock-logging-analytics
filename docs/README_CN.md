@@ -1,221 +1,133 @@
-# [IaC] Bedrock 调用日志分析方案
+# Bedrock 调用日志分析
 
 [English](../README.md) | 中文
 
-一键部署 Amazon Bedrock 调用日志记录，通过 Amazon Athena 分析 Token 消耗与费用。
+Amazon Bedrock 实时分析 — 监控多账户的 Token 用量、成本和性能。
 
 ## 架构
 
 ```
-Bedrock API 调用 → 调用日志 → S3 (JSON.gz) → Athena (SQL 查询)
+Bedrock API → 调用日志 → S3 (JSON.gz)
+                            │ S3 事件 (EventBridge)
+                            ▼
+                         Lambda ETL → DynamoDB (聚合数据)
+                                          │
+                                          ▼
+                                     WebUI (仪表盘)
 ```
 
-![架构图](arch_cn.png)
+**工作原理：**
+1. Bedrock 将调用日志以压缩 JSON 格式写入 S3
+2. 每个新日志文件触发 Lambda，解析 Token、延迟、调用者信息并计算成本
+3. 聚合统计数据存入 DynamoDB（按模型、按调用者、汇总 — 小时/天/月粒度）
+4. WebUI 从 DynamoDB 读取数据，亚秒级加载
 
-**部署资源：**
-- AWS Lambda (自定义资源) — 配置 Bedrock 调用日志
-- IAM Role — Lambda 执行角色，具备 Bedrock 日志配置权限
-- Athena WorkGroup — 专用工作组，含查询结果位置和 10GB 扫描限制
-- Athena Named Queries — 7 个预置分析查询模板
-- S3 Bucket (可选) — 含 AES256 加密、公开访问阻止和生命周期策略
-
-## 部署
-
-| 区域 | 部署 |
-|------|------|
-| us-west-2 (俄勒冈) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-west-2.console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?stackName=bedrock-logging-analytics&templateURL=https://raw.githubusercontent.com/aleck31/bedrock-logging-analytics/main/cf-deploy-template.yaml) |
-| us-east-1 (弗吉尼亚北部) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=bedrock-logging-analytics&templateURL=https://raw.githubusercontent.com/aleck31/bedrock-logging-analytics/main/cf-deploy-template.yaml) |
-
-## 参数说明
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| UseExistingBucket | No | `Yes` 使用已有 S3 存储桶，`No` 创建新桶 |
-| ExistingBucketName | — | 选择 Yes 时必填，该桶需允许 Bedrock 执行 `s3:PutObject` |
-| LogPrefix | `bedrock/invocation-logs/` | S3 日志前缀 |
-| LogRetentionDays | 365 | 日志保留天数（仅新建桶生效） |
-| AthenaDbName | `bedrock_analytics` | Athena 数据库名称 |
-
-## 部署后配置
-
-1. 打开 **Athena 控制台**，选择工作组 `bedrock-logging-analytics-workgroup`
-2. 进入 **已保存的查询** 标签页
-3. 先运行 `bedrock-logging-analytics-create-database`
-4. 再运行 `bedrock-logging-analytics-create-table` 创建分区表
-5. 开始使用预置的分析查询
-
-## 预置查询
-
-| 查询名称 | 说明 |
-|----------|------|
-| token-usage-by-model | 按模型统计 Token 消耗和平均延迟（近 7 天） |
-| estimated-cost-by-model | 按模型估算费用（近 30 天） |
-| usage-by-caller | 按 IAM 用户/角色统计用量，用于费用分摊 |
-| hourly-trend | 按小时统计调用和 Token 趋势（近 24 小时） |
-| daily-trend | 按天统计调用和 Token 趋势（近 30 天） |
-| high-latency-calls | 延迟超过 5 秒的调用（近 7 天） |
-
-## 使用方法
-
-### Athena 控制台查询
-
-1. 打开 [Athena 控制台](https://console.aws.amazon.com/athena/home)
-2. 在顶部下拉框选择工作组 `bedrock-logging-analytics-workgroup`
-3. 进入 **已保存的查询** 标签页 → 点击任意预置查询 → **运行**
-4. 或在 **编辑器** 标签页中编写自定义查询，表名为 `bedrock_analytics.invocation_logs`
-
-### AWS CLI 查询
-
-```bash
-# 执行查询
-QUERY_ID=$(aws athena start-query-execution \
-  --query-string "SELECT modelId, count(*) as cnt, sum(input.inputTokenCount) as input_tokens, sum(output.outputTokenCount) as output_tokens FROM invocation_logs WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H') GROUP BY modelId ORDER BY cnt DESC" \
-  --query-execution-context Database=bedrock_analytics \
-  --work-group bedrock-logging-analytics-workgroup \
-  --region us-west-2 \
-  --query 'QueryExecutionId' --output text)
-
-# 等待完成
-aws athena get-query-execution --query-execution-id $QUERY_ID \
-  --region us-west-2 --query 'QueryExecution.Status.State' --output text
-
-# 获取结果
-aws athena get-query-results --query-execution-id $QUERY_ID \
-  --region us-west-2 --output table
-```
-
-### Python (boto3) 查询
-
-```python
-import boto3, time
-
-athena = boto3.client('athena', region_name='us-west-2')
-
-resp = athena.start_query_execution(
-    QueryString="""
-        SELECT modelId, count(*) as invocations,
-               sum(input.inputTokenCount) as input_tokens,
-               sum(output.outputTokenCount) as output_tokens
-        FROM invocation_logs
-        WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H')
-        GROUP BY modelId
-    """,
-    QueryExecutionContext={'Database': 'bedrock_analytics'},
-    WorkGroup='bedrock-logging-analytics-workgroup'
-)
-
-query_id = resp['QueryExecutionId']
-
-# 等待查询完成
-while True:
-    status = athena.get_query_execution(QueryExecutionId=query_id)
-    state = status['QueryExecution']['Status']['State']
-    if state in ('SUCCEEDED', 'FAILED', 'CANCELLED'):
-        break
-    time.sleep(1)
-
-# 获取结果
-results = athena.get_query_results(QueryExecutionId=query_id)
-for row in results['ResultSet']['Rows']:
-    print([col.get('VarCharValue', '') for col in row['Data']])
-```
-
-### 自定义查询提示
-
-查询时务必加上 `datehour` 分区过滤条件，以减少 Athena 扫描量和费用：
-
-```sql
--- 最近 24 小时
-WHERE datehour >= date_format(date_add('day', -1, now()), '%Y/%m/%d/%H')
-
--- 指定日期
-WHERE datehour >= '2026/03/17/00' AND datehour <= '2026/03/17/23'
-
--- 最近 7 天
-WHERE datehour >= date_format(date_add('day', -7, now()), '%Y/%m/%d/%H')
-```
-
-## Web UI（可选）
-
-基于 Streamlit 的可视化仪表盘，用于展示 Bedrock 使用量和费用。
+## WebUI
 
 ![WebUI 截图](webui_screenshot.png)
 
-### 快速启动
+**功能：**
+- 概览卡片：调用次数、输入/输出 Token、预估成本、平均延迟
+- 按模型和调用者的 Token 用量与成本图表（图表/表格切换）
+- 使用趋势
+- 多账户、多区域支持（侧栏选择器）
+- 响应式布局（桌面和移动端）
+
+## 前置条件
+
+- [AWS CDK CLI](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)（`npm install -g aws-cdk`）
+- [uv](https://docs.astral.sh/uv/)（Python 包管理器）
+- 已配置 AWS 凭证（`aws configure` 或 `~/.aws/credentials`）
+
+## 部署
 
 ```bash
-cd webui
+# 安装依赖
 uv sync
-uv run streamlit run app.py
+
+# 初始化 CDK（仅首次需要）
+./deploy.sh bootstrap --region us-west-2 --profile YOUR_PROFILE
+
+# 创建新 S3 存储桶部署
+./deploy.sh deploy --profile YOUR_PROFILE \
+  --parameters ExistingBucketName="" LogPrefix="bedrock/invocation-logs/"
+
+# 使用已有 S3 存储桶部署
+./deploy.sh deploy --profile YOUR_PROFILE \
+  --parameters ExistingBucketName=你的桶名 LogPrefix="bedrock/invocation-logs/"
 ```
 
-浏览器打开 http://localhost:8501
+> 使用已有存储桶时，需启用 S3 EventBridge 通知：
+> ```bash
+> aws s3api put-bucket-notification-configuration --bucket 你的桶名 \
+>   --notification-configuration '{"EventBridgeConfiguration": {}}'
+> ```
 
-### 功能
+### 部署资源
 
-- 汇总卡片：总调用次数、Input/Output Tokens、估算费用
-- 按模型的 Token 消耗和费用图表
-- 按调用者（IAM 用户/角色）的 Token 消耗和费用图表
-- 按天和按小时的趋势图
-- 延迟分析（min/avg/max）及高延迟调用检测
+| 资源 | 用途 |
+|------|------|
+| Custom Resource | 配置 Bedrock 调用日志 |
+| DynamoDB 表 × 2 | 用量统计聚合 + 模型定价 |
+| Lambda 函数 × 2 | 日志处理（事件驱动）+ 统计汇总（定时调度） |
+| EventBridge × 3 | S3 触发器 + 每日/每月汇总调度 |
+| S3 存储桶（可选） | 原始日志，含加密、生命周期、EventBridge 通知 |
 
-### 配置
+## 初始化定价数据
 
-通过左侧边栏配置：
-- AWS Profile
-- Region
-- Athena Workgroup 名称
-- Athena Database 名称
-- 时间范围（1 天 / 7 天 / 30 天 / 90 天）
-
-## CLI 部署
+定价数据来源于 [LiteLLM](https://github.com/BerriAI/litellm)（覆盖 286+ Bedrock 模型）：
 
 ```bash
-# 创建新桶
-aws cloudformation create-stack \
-  --stack-name bedrock-logging-analytics \
-  --template-body file://cf-deploy-template.yaml \
-  --parameters ParameterKey=UseExistingBucket,ParameterValue=No \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
+AWS_DEFAULT_REGION=us-west-2 python3 scripts/seed_pricing.py \
+  BedrockLoggingAnalytics-model-pricing YOUR_PROFILE
+```
 
-# 使用已有桶
-aws cloudformation create-stack \
-  --stack-name bedrock-logging-analytics \
-  --template-body file://cf-deploy-template.yaml \
-  --parameters ParameterKey=UseExistingBucket,ParameterValue=Yes \
-               ParameterKey=ExistingBucketName,ParameterValue=你的桶名 \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
+## 启动 WebUI
+
+```bash
+./start-webui.sh --region us-west-2 --profile YOUR_PROFILE
+```
+
+浏览器打开 http://localhost:8080
+
+## 项目结构
+
+```
+├── deploy/
+│   ├── cdk.json              # CDK 配置
+│   ├── app.py                # CDK 应用入口
+│   ├── stack.py              # Stack 定义
+│   └── lambda/
+│       ├── process_log.py    # ETL：S3 事件 → 解析 → DDB 聚合
+│       └── aggregate_stats.py # 汇总：HOURLY → DAILY → MONTHLY
+├── webui/
+│   ├── app.py                # NiceGUI 仪表盘
+│   └── data.py               # DynamoDB 数据访问层
+├── scripts/
+│   └── seed_pricing.py       # 从 LiteLLM 导入定价
+├── deploy.sh                 # CDK 便捷脚本
+├── start-webui.sh            # WebUI 启动脚本
+└── pyproject.toml            # 依赖管理（uv）
 ```
 
 ## 清理
 
 ```bash
-aws cloudformation delete-stack --stack-name bedrock-logging-analytics --region us-west-2
+./deploy.sh destroy --profile YOUR_PROFILE
 ```
 
-> 删除堆栈会关闭 Bedrock 调用日志。如果创建了新的 S3 桶，该桶会被保留（DeletionPolicy: Retain），需手动删除。
+> DynamoDB 表和 S3 存储桶在删除 Stack 后会保留（RemovalPolicy: RETAIN）。
 
-## 费用
-
-本方案涉及三项 AWS 服务费用：
+## 成本
 
 | 服务 | 定价 | 说明 |
 |------|------|------|
-| S3 存储 | ~$0.023/GB/月 (Standard) | 90 天后自动转为 Standard-IA ($0.0125/GB) |
-| Athena | $5/TB 扫描量 | 分区投影可大幅减少扫描量 |
-| Lambda | $0.20/百万次请求 | 仅在堆栈创建/更新/删除时调用 |
+| DynamoDB | 按请求付费 | 约 $1.25/百万次写入，读取可忽略 |
+| Lambda | $0.20/百万次请求 | 每个日志文件约 60ms |
+| S3 | 约 $0.023/GB/月 | 90 天后自动转为低频存储 |
 
-**月度费用估算**（假设每次调用日志压缩后平均 ~1KB）：
-
-| 月调用量 | S3 存储 | Athena (每天10次查询) | 预估总费用 |
-|--------:|---------:|---------------------:|-----------:|
-| 1 万次 | < $0.01 | < $0.01 | < $0.05 |
-| 10 万次 | ~$0.01 | ~$0.05 | ~$0.10 |
-| 100 万次 | ~$0.10 | ~$0.50 | ~$0.70 |
-| 1000 万次 | ~$1.00 | ~$5.00 | ~$7.00 |
-
-> - S3 存储为累积量（每月增长，直到生命周期策略过期删除）
-> - Athena 费用取决于查询频率和时间范围 — 查询时务必使用 `datehour` 分区过滤以减少扫描量
-> - 实际日志大小与 prompt/response 长度相关，长对话场景下平均可能达到 5-10KB+/次
+**月度估算**（100 万次 Bedrock 调用）：
+- Lambda：约 $0.20
+- DynamoDB：约 $4（每次调用 3 次写入）
+- S3：约 $1（累计日志存储）
+- **合计：约 $5/月**

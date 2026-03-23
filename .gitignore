@@ -2,10 +2,8 @@
 __pycache__/
 *.pyc
 .venv/
+.dev/
 uv.lock
 
 # CDK
-deploy/cdk.out/
-
-# Dev notes
-.dev/
+cdk.out/

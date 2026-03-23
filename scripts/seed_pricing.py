@@ -42,13 +42,13 @@ def extract_bedrock_models(data):
 def seed_table(table_name, models, profile=None):
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     table = session.resource("dynamodb").Table(table_name)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    start_time = "2025-03-01T00:00:00Z"  # Base price effective from the beginning
 
     with table.batch_writer() as batch:
         for model_id, pricing in models.items():
             batch.put_item(Item={
                 "PK": f"MODEL#{model_id}",
-                "SK": now,
+                "SK": start_time,
                 "input_per_1k": str(pricing["input_per_1k"]),
                 "output_per_1k": str(pricing["output_per_1k"]),
                 "source": "litellm",
