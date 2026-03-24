@@ -79,7 +79,7 @@ Pricing data is sourced from [LiteLLM](https://github.com/BerriAI/litellm) (286+
 
 ```bash
 AWS_DEFAULT_REGION=us-west-2 python3 scripts/seed_pricing.py \
-  BedrockLoggingAnalytics-model-pricing YOUR_PROFILE
+  BedrockInvocationAnalytics-model-pricing YOUR_PROFILE
 ```
 
 ## Start WebUI

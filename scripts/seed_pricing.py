@@ -9,6 +9,8 @@ import boto3
 
 LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 BEDROCK_PROVIDERS = ("bedrock", "bedrock_converse")
+DEFAULT_TABLE = "BedrockInvocationAnalytics-model-pricing"
+DEFAULT_EFFECTIVE_DATE = "2025-03-01T00:00:00Z"
 
 
 def fetch_pricing():
@@ -42,13 +44,13 @@ def extract_bedrock_models(data):
 def seed_table(table_name, models, profile=None):
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     table = session.resource("dynamodb").Table(table_name)
-    start_time = "2025-03-01T00:00:00Z"  # Base price effective from the beginning
+    effctive_date = DEFAULT_EFFECTIVE_DATE
 
     with table.batch_writer() as batch:
         for model_id, pricing in models.items():
             batch.put_item(Item={
                 "PK": f"MODEL#{model_id}",
-                "SK": start_time,
+                "SK": effctive_date,
                 "input_per_1k": str(pricing["input_per_1k"]),
                 "output_per_1k": str(pricing["output_per_1k"]),
                 "source": "litellm",
@@ -57,7 +59,7 @@ def seed_table(table_name, models, profile=None):
 
 
 if __name__ == "__main__":
-    table = sys.argv[1] if len(sys.argv) > 1 else "BedrockLoggingAnalytics-model-pricing"
+    table = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TABLE
     profile = sys.argv[2] if len(sys.argv) > 2 else None
 
     print("Fetching LiteLLM pricing data...")

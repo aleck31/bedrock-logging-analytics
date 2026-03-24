@@ -2,13 +2,11 @@
 
 import os
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-
 import boto3
 from boto3.dynamodb.conditions import Key
 
-USAGE_TABLE = os.environ.get("USAGE_STATS_TABLE", "BedrockLoggingAnalytics-usage-stats")
-PRICING_TABLE = os.environ.get("MODEL_PRICING_TABLE", "BedrockLoggingAnalytics-model-pricing")
+USAGE_TABLE = os.environ.get("USAGE_STATS_TABLE", "BedrockInvocationAnalytics-usage-stats")
+PRICING_TABLE = os.environ.get("MODEL_PRICING_TABLE", "BedrockInvocationAnalytics-model-pricing")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 
 _ddb = boto3.resource("dynamodb", region_name=AWS_REGION)

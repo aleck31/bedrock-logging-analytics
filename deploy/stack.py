@@ -19,7 +19,7 @@ from aws_cdk import (
 from constructs import Construct
 
 
-class BedrockLoggingAnalyticsStack(Stack):
+class BedrockInvocationAnalyticsStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs):
         super().__init__(scope, id, **kwargs)
 
@@ -121,11 +121,19 @@ class BedrockLoggingAnalyticsStack(Stack):
         )
         logging_fn = _lambda.Function(self, "BedrockLoggingFunction",
             function_name=f"{id}-bedrock-invocation-setup",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_13,
             handler="index.handler", timeout=Duration.seconds(30),
             role=logging_role,
             code=_lambda.Code.from_inline("""
-import boto3, cfnresponse
+import boto3, json, urllib.request
+def send(event, ctx, status, data={}):
+    try:
+        body = json.dumps({'Status': status, 'Reason': str(data.get('Error','')),
+            'PhysicalResourceId': ctx.log_stream_name, 'StackId': event['StackId'],
+            'RequestId': event['RequestId'], 'LogicalResourceId': event['LogicalResourceId'], 'Data': data})
+        urllib.request.urlopen(urllib.request.Request(event['ResponseURL'], body.encode(), {'content-type':''}))
+    except Exception as e:
+        print(f'Failed to send cfn response: {e}')
 def handler(event, context):
     try:
         client = boto3.client('bedrock')
@@ -137,11 +145,12 @@ def handler(event, context):
                 'textDataDeliveryEnabled': True, 'imageDataDeliveryEnabled': True, 'embeddingDataDeliveryEnabled': True,
             })
         elif rt == 'Delete':
-            client.delete_model_invocation_logging_configuration()
-        cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            try: client.delete_model_invocation_logging_configuration()
+            except: pass
+        send(event, context, 'SUCCESS')
     except Exception as e:
         print(e)
-        cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+        send(event, context, 'FAILED', {'Error': str(e)})
 """),
         )
         CustomResource(self, "BedrockLogging",
@@ -169,7 +178,7 @@ def handler(event, context):
         # ── Lambda: Process each new log file ──
         process_log_fn = _lambda.Function(self, "ProcessLogFunction",
             function_name=f"{id}-process-log",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_13,
             handler="process_log.handler",
             code=_lambda.Code.from_asset("lambda"),
             timeout=Duration.seconds(60), memory_size=256,
@@ -199,7 +208,7 @@ def handler(event, context):
         # ── Lambda: Aggregate hourly→daily→monthly ──
         aggregate_stats_fn = _lambda.Function(self, "AggregateStatsFunction",
             function_name=f"{id}-aggregate-stats",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_13,
             handler="aggregate_stats.handler",
             code=_lambda.Code.from_asset("lambda"),
             timeout=Duration.seconds(300), memory_size=256,
@@ -221,7 +230,7 @@ def handler(event, context):
         # ── Lambda: Sync pricing from LiteLLM (weekly) ──
         sync_pricing_fn = _lambda.Function(self, "SyncPricingFunction",
             function_name=f"{id}-sync-pricing",
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            runtime=_lambda.Runtime.PYTHON_3_13,
             handler="sync_pricing.handler",
             code=_lambda.Code.from_asset("lambda"),
             timeout=Duration.seconds(120), memory_size=256,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import aws_cdk as cdk
-from stack import BedrockLoggingAnalyticsStack
+from stack import BedrockInvocationAnalyticsStack
 
 app = cdk.App()
-BedrockLoggingAnalyticsStack(app, "BedrockLoggingAnalytics")
+BedrockInvocationAnalyticsStack(app, "BedrockInvocationAnalytics")
 app.synth()

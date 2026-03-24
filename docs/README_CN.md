@@ -79,7 +79,7 @@ uv sync
 
 ```bash
 AWS_DEFAULT_REGION=us-west-2 python3 scripts/seed_pricing.py \
-  BedrockLoggingAnalytics-model-pricing YOUR_PROFILE
+  BedrockInvocationAnalytics-model-pricing YOUR_PROFILE
 ```
 
 ## 启动 WebUI

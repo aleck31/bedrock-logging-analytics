@@ -64,6 +64,10 @@ def dashboard_page():
         ).classes("w-full mt-2")
 
         ui.separator().classes("my-4")
+        ui.input(value=data.USAGE_TABLE, label="Usage Table").props("readonly dense outlined").classes("w-full text-xs")
+        ui.input(value=data.PRICING_TABLE, label="Pricing Table").props("readonly dense outlined").classes("w-full mt-2 text-xs")
+        ui.input(value="", label="Athena Workgroup").props("readonly dense outlined").classes("w-full mt-2 text-xs")
+        ui.separator().classes("my-4")
         ui.label(f"Deployed Region: {data.AWS_REGION}").classes("text-xs text-gray-400")
         ui.label(f"v{VERSION}").classes("text-xs text-gray-400")
 
