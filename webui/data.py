@@ -107,10 +107,18 @@ def get_by_model(account_region: str, days: int = 7) -> list[dict]:
     for item in items:
         model = item["dimension"].replace("MODEL#", "")
         if model not in models:
-            models[model] = {"model": model, "invocations": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
-        for k in ("invocations", "input_tokens", "output_tokens"):
+            models[model] = {"model": model, "invocations": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "latency_sum_ms": 0, "max_latency_ms": 0, "min_latency_ms": 0}
+        for k in ("invocations", "input_tokens", "output_tokens", "latency_sum_ms"):
             models[model][k] += item.get(k, 0)
         models[model]["cost_usd"] += item.get("cost_usd", 0.0)
+        models[model]["max_latency_ms"] = max(models[model]["max_latency_ms"], item.get("max_latency_ms", 0))
+        item_min = item.get("min_latency_ms", 0)
+        if item_min > 0:
+            cur_min = models[model]["min_latency_ms"]
+            models[model]["min_latency_ms"] = item_min if cur_min == 0 else min(cur_min, item_min)
+
+    for m in models.values():
+        m["avg_latency_ms"] = round(m["latency_sum_ms"] / m["invocations"]) if m["invocations"] else 0
 
     return sorted(models.values(), key=lambda x: x["cost_usd"], reverse=True)
 
@@ -133,11 +141,11 @@ def get_by_caller(account_region: str, days: int = 7) -> list[dict]:
     return sorted(callers.values(), key=lambda x: x["cost_usd"], reverse=True)
 
 
-def get_trend(account_region: str, days: int = 7) -> list[dict]:
-    """Get time-series trend data (TOTAL per period)."""
+def get_trend(account_region: str, days: int = 7, dimension: str = "TOTAL") -> list[dict]:
+    """Get time-series trend data per period."""
     g, start, end = _resolve_granularity(account_region, days)
 
-    items = query_usage(account_region, g, start, end, "TOTAL")
+    items = query_usage(account_region, g, start, end, dimension)
     return sorted(items, key=lambda x: x["period"])
 
 
@@ -187,6 +195,17 @@ def get_pricing_sync_info() -> dict | None:
         return None
 
 
+def save_pricing(model_id: str, input_per_1k: float, output_per_1k: float, effective_date: str):
+    """Save a manual pricing record."""
+    _pricing.put_item(Item={
+        "PK": f"MODEL#{model_id}",
+        "SK": effective_date,
+        "input_per_1k": str(round(input_per_1k, 6)),
+        "output_per_1k": str(round(output_per_1k, 6)),
+        "source": "manual",
+    })
+
+
 def _format_item(item: dict, granularity: str) -> dict:
     """Convert DynamoDB item to clean dict."""
     sk = item["SK"]
@@ -209,4 +228,5 @@ def _format_item(item: dict, granularity: str) -> dict:
         "latency_sum_ms": latency_sum,
         "avg_latency_ms": round(latency_sum / invocations) if invocations else 0,
         "max_latency_ms": int(item.get("max_latency_ms", 0)),
+        "min_latency_ms": int(item.get("min_latency_ms", 0)),
     }
