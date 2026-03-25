@@ -13,4 +13,4 @@ with open(Path(__file__).parent.parent / "pyproject.toml", "rb") as f:
 # Expose version for other modules
 dashboard.VERSION = VERSION
 
-ui.run(title="Bedrock Invocation Analytics", favicon="docs/favicon.svg", port=8080, reload=False)
+ui.run(title="Bedrock Invocation Analytics", favicon="docs/favicon.svg", port=8060, reload=False)

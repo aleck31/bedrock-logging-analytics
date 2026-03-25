@@ -28,8 +28,11 @@ Bedrock API → 调用日志 → S3 (JSON.gz)
 
 **功能：**
 - 概览卡片：调用次数、输入/输出 Token、预估成本、平均延迟
-- 按模型和调用者的 Token 用量与成本图表（图表/表格切换）
-- 使用趋势
+- 按模型和调用者的 Token 用量与成本（图表 / 饼图 / 表格视图）
+- 饼图：输入 Token、输出 Token、成本占比
+- 性能分析：按模型延迟（min/avg/max）+ 延迟趋势（支持按模型筛选）
+- 使用趋势（支持按模型筛选）
+- 定价设置：查看/编辑模型定价，同步状态
 - 多账户、多区域支持（侧栏选择器）
 - 响应式布局（桌面和移动端）
 
@@ -69,8 +72,8 @@ uv sync
 |------|------|
 | Custom Resource | 配置 Bedrock 调用日志 |
 | DynamoDB 表 × 2 | 用量统计聚合 + 模型定价 |
-| Lambda 函数 × 2 | 日志处理（事件驱动）+ 统计汇总（定时调度） |
-| EventBridge × 3 | S3 触发器 + 每日/每月汇总调度 |
+| Lambda 函数 × 3 | 日志处理（事件驱动）+ 统计汇总（定时调度）+ 定价同步（每周）|
+| EventBridge × 4 | S3 触发器 + 每日/每月汇总 + 每周定价同步 |
 | S3 存储桶（可选） | 原始日志，含加密、生命周期、EventBridge 通知 |
 
 ## 初始化定价数据
@@ -99,9 +102,12 @@ AWS_DEFAULT_REGION=us-west-2 python3 scripts/seed_pricing.py \
 │   ├── stack.py              # Stack 定义
 │   └── lambda/
 │       ├── process_log.py    # ETL：S3 事件 → 解析 → DDB 聚合
-│       └── aggregate_stats.py # 汇总：HOURLY → DAILY → MONTHLY
+│       ├── aggregate_stats.py # 汇总：HOURLY → DAILY → MONTHLY
+│       └── sync_pricing.py   # 每周从 LiteLLM 同步定价
 ├── webui/
-│   ├── app.py                # NiceGUI 仪表盘
+│   ├── main.py               # 入口（ui.run）
+│   ├── dashboard.py          # 仪表盘页面
+│   ├── pricing.py            # 定价设置页面
 │   └── data.py               # DynamoDB 数据访问层
 ├── scripts/
 │   └── seed_pricing.py       # 从 LiteLLM 导入定价

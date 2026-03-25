@@ -161,17 +161,21 @@ def update_aggregation(pk, sk, input_tokens, output_tokens, cost_micro, latency_
         ExpressionAttributeNames=expr_names,
     )
 
-    # Conditional max_latency_ms update (separate call to avoid complexity)
+    # Conditional max/min latency_ms update (separate calls to avoid complexity)
     if latency_ms > 0:
-        try:
-            usage_stats_table.update_item(
-                Key={"PK": pk, "SK": sk},
-                UpdateExpression="SET max_latency_ms = :val",
-                ConditionExpression="attribute_not_exists(max_latency_ms) OR max_latency_ms < :val",
-                ExpressionAttributeValues={":val": latency_ms},
-            )
-        except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-            pass  # existing max is higher, that's fine
+        for expr, cond in [
+            ("SET max_latency_ms = :val", "attribute_not_exists(max_latency_ms) OR max_latency_ms < :val"),
+            ("SET min_latency_ms = :val", "attribute_not_exists(min_latency_ms) OR min_latency_ms > :val"),
+        ]:
+            try:
+                usage_stats_table.update_item(
+                    Key={"PK": pk, "SK": sk},
+                    UpdateExpression=expr,
+                    ConditionExpression=cond,
+                    ExpressionAttributeValues={":val": latency_ms},
+                )
+            except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+                pass
 
 
 def get_pricing(model_id, timestamp_str):

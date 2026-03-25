@@ -125,13 +125,15 @@ class BedrockInvocationAnalyticsStack(Stack):
             handler="index.handler", timeout=Duration.seconds(30),
             role=logging_role,
             code=_lambda.Code.from_inline("""
-import boto3, json, urllib.request
+import boto3, json, urllib3
+http = urllib3.PoolManager()
 def send(event, ctx, status, data={}):
     try:
         body = json.dumps({'Status': status, 'Reason': str(data.get('Error','')),
             'PhysicalResourceId': ctx.log_stream_name, 'StackId': event['StackId'],
             'RequestId': event['RequestId'], 'LogicalResourceId': event['LogicalResourceId'], 'Data': data})
-        urllib.request.urlopen(urllib.request.Request(event['ResponseURL'], body.encode(), {'content-type':''}))
+        resp = http.request('PUT', event['ResponseURL'], headers={'content-type':'','content-length':str(len(body))}, body=body)
+        print(f'cfn response status: {resp.status}')
     except Exception as e:
         print(f'Failed to send cfn response: {e}')
 def handler(event, context):

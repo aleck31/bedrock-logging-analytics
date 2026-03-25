@@ -28,8 +28,11 @@ Bedrock API → Invocation Logging → S3 (JSON.gz)
 
 **Features:**
 - Summary cards: invocations, input/output tokens, estimated cost, avg latency
-- Token usage & cost charts by model and by caller (chart/table toggle)
-- Usage trend over time
+- Token usage & cost by model and by caller (chart / pie / table views)
+- Pie charts: input tokens, output tokens, cost breakdown
+- Performance: latency by model (min/avg/max) + latency trend with model selector
+- Usage trend over time with model selector
+- Pricing settings: view/edit model pricing, sync status
 - Multi-account, multi-region support (sidebar selector)
 - Responsive layout (desktop & mobile)
 
@@ -69,8 +72,8 @@ uv sync
 |----------|---------|
 | Custom Resource | Configures Bedrock invocation logging |
 | DynamoDB table × 2 | Usage stats aggregation + model pricing |
-| Lambda function × 2 | Log processing (event-driven) + stats rollup (scheduled) |
-| EventBridge × 3 | S3 trigger + daily/monthly rollup schedules |
+| Lambda function × 3 | Log processing (event-driven) + stats rollup (scheduled) + pricing sync (weekly) |
+| EventBridge × 4 | S3 trigger + daily/monthly rollup + weekly pricing sync |
 | S3 Bucket (optional) | Raw logs with encryption, lifecycle, EventBridge notifications |
 
 ## Seed Pricing Data
@@ -99,9 +102,12 @@ Open http://localhost:8080 in your browser.
 │   ├── stack.py              # Stack definition
 │   └── lambda/
 │       ├── process_log.py    # ETL: S3 event → parse → DDB aggregation
-│       └── aggregate_stats.py # Rollup: HOURLY → DAILY → MONTHLY
+│       ├── aggregate_stats.py # Rollup: HOURLY → DAILY → MONTHLY
+│       └── sync_pricing.py   # Weekly pricing sync from LiteLLM
 ├── webui/
-│   ├── app.py                # NiceGUI dashboard
+│   ├── main.py               # Entry point (ui.run)
+│   ├── dashboard.py          # Dashboard page
+│   ├── pricing.py            # Pricing settings page
 │   └── data.py               # DynamoDB data access
 ├── scripts/
 │   └── seed_pricing.py       # Seed pricing from LiteLLM

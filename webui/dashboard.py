@@ -3,7 +3,7 @@
 from nicegui import ui
 from webui import data
 
-VERSION = ""  # Set by index.py
+VERSION = ""  # Set by main.py
 
 
 def format_number(n: int) -> str:
@@ -29,6 +29,7 @@ def dashboard_page():
         ui.button(icon="menu", on_click=lambda: drawer.toggle()).props("flat round")
         ui.label("Bedrock Invocation Analytics").classes("text-xl font-bold ml-2")
         ui.space()
+        ui.button(icon="refresh", on_click=lambda: ui.navigate.to("/")).props("flat round").tooltip("Refresh")
         ui.button(icon="settings", on_click=lambda: ui.navigate.to("/pricing")).props("flat round").tooltip("Pricing Settings")
 
     # ── Left drawer (sidebar) ──
@@ -63,10 +64,10 @@ def dashboard_page():
             label="Time Range",
         ).classes("w-full mt-2")
 
-        ui.separator().classes("my-4")
         ui.input(value=data.USAGE_TABLE, label="Usage Table").props("readonly dense outlined").classes("w-full text-xs")
         ui.input(value=data.PRICING_TABLE, label="Pricing Table").props("readonly dense outlined").classes("w-full mt-2 text-xs")
         ui.input(value="", label="Athena Workgroup").props("readonly dense outlined").classes("w-full mt-2 text-xs")
+
         ui.separator().classes("my-4")
         ui.label(f"Deployed Region: {data.AWS_REGION}").classes("text-xs text-gray-400")
         ui.label(f"v{VERSION}").classes("text-xs text-gray-400")
@@ -110,9 +111,27 @@ def render_dashboard(account_region: str, days: int):
                 ui.space()
                 with ui.tabs().props("dense").classes("text-xs") as model_tabs:
                     ui.tab("chart", label="Chart", icon="bar_chart")
+                    ui.tab("pie", label="Pie", icon="pie_chart")
                     ui.tab("table", label="Table", icon="table_rows")
             ui.separator()
             with ui.tab_panels(model_tabs, value="chart").classes("w-full max-h-[420px] overflow-auto p-0"):
+                with ui.tab_panel("pie").classes("p-2"):
+                    with ui.row().classes("w-full gap-0"):
+                        short_names = {m["model"]: m["model"].replace("global.", "").replace("anthropic.", "").replace("meta.", "")[:25] for m in models}
+                        for title, key, fmt in [
+                            ("Input Tokens", "input_tokens", "{b}\n{c}"),
+                            ("Output Tokens", "output_tokens", "{b}\n{c}"),
+                            ("Cost", "cost_usd", "{b}\n${c}"),
+                        ]:
+                            pie_data = [{"name": short_names[m["model"]], "value": round(m[key], 4) if key == "cost_usd" else m[key]} for m in models[:10]]
+                            ui.echart({
+                                "tooltip": {"trigger": "item", "formatter": "{b}: {d}%"},
+                                "title": {"text": title, "left": "center", "textStyle": {"fontSize": 13, "color": "#6B7280"}},
+                                "series": [{"name": title, "type": "pie", "radius": ["30%", "60%"],
+                                    "label": {"formatter": fmt, "fontSize": 10},
+                                    "data": pie_data,
+                                }],
+                            }).classes("flex-1 h-80")
                 with ui.tab_panel("chart").classes("p-2"):
                     model_names = [m["model"].replace("global.", "").replace("anthropic.", "").replace("meta.", "")[:30] for m in models[:15]]
                     ui.echart({
@@ -151,9 +170,26 @@ def render_dashboard(account_region: str, days: int):
                 ui.space()
                 with ui.tabs().props("dense").classes("text-xs") as caller_tabs:
                     ui.tab("chart", label="Chart", icon="bar_chart")
+                    ui.tab("pie", label="Pie", icon="pie_chart")
                     ui.tab("table", label="Table", icon="table_rows")
             ui.separator()
             with ui.tab_panels(caller_tabs, value="chart").classes("w-full max-h-[420px] overflow-auto p-0"):
+                with ui.tab_panel("pie").classes("p-2"):
+                    with ui.row().classes("w-full gap-0"):
+                        for title, key, fmt in [
+                            ("Input Tokens", "input_tokens", "{b}\n{c}"),
+                            ("Output Tokens", "output_tokens", "{b}\n{c}"),
+                            ("Cost", "cost_usd", "{b}\n${c}"),
+                        ]:
+                            pie_data = [{"name": c["caller"][:20], "value": round(c[key], 4) if key == "cost_usd" else c[key]} for c in callers[:10]]
+                            ui.echart({
+                                "tooltip": {"trigger": "item", "formatter": "{b}: {d}%"},
+                                "title": {"text": title, "left": "center", "textStyle": {"fontSize": 13, "color": "#6B7280"}},
+                                "series": [{"name": title, "type": "pie", "radius": ["30%", "60%"],
+                                    "label": {"formatter": fmt, "fontSize": 10},
+                                    "data": pie_data,
+                                }],
+                            }).classes("flex-1 h-80")
                 with ui.tab_panel("chart").classes("p-2"):
                     caller_names = [c["caller"][:25] for c in callers[:15]]
                     ui.echart({
@@ -186,22 +222,92 @@ def render_dashboard(account_region: str, days: int):
     # ── Usage Trend ──
     trend = data.get_trend(account_region, days)
     if trend:
+        model_options = {"TOTAL": "All Models"} | {f"MODEL#{m['model']}": m["model"] for m in models} if models else {"TOTAL": "All Models"}
+
         with ui.card().classes("w-full p-2"):
-            ui.label("Usage Trend").classes("text-lg font-semibold px-2 pt-2")
-            ui.echart({
+            with ui.row().classes("w-full items-center px-2 pt-2"):
+                ui.label("Usage Trend").classes("text-lg font-semibold")
+                ui.space()
+                usage_model_select = ui.select(model_options, value="TOTAL").props("dense outlined").classes("w-48")
+
+            usage_chart = ui.echart({
                 "tooltip": {"trigger": "axis"},
                 "legend": {"top": 0},
                 "grid": {"top": 40, "bottom": 30, "left": 60, "right": 60},
-                "xAxis": {"type": "category", "data": [t["period"] for t in trend]},
+                "xAxis": {"type": "category", "data": []},
                 "yAxis": [
                     {"type": "value", "name": "Invocations"},
                     {"type": "value", "name": "Cost ($)"},
                 ],
-                "series": [
-                    {"name": "Invocations", "type": "bar", "data": [t["invocations"] for t in trend]},
-                    {"name": "Cost ($)", "type": "line", "itemStyle": {"color": "#F97316"}, "yAxisIndex": 1, "data": [round(t["cost_usd"], 6) for t in trend]},
-                ],
+                "series": [],
             }).classes("w-full h-80")
+
+            def update_usage_chart(dim="TOTAL"):
+                t = data.get_trend(account_region, days, dim)
+                usage_chart.options["xAxis"]["data"] = [x["period"] for x in t]
+                usage_chart.options["series"] = [
+                    {"name": "Invocations", "type": "bar", "data": [x["invocations"] for x in t]},
+                    {"name": "Cost ($)", "type": "line", "itemStyle": {"color": "#F97316"}, "yAxisIndex": 1, "data": [round(x["cost_usd"], 6) for x in t]},
+                ]
+                usage_chart.update()
+
+            usage_model_select.on_value_change(lambda e: update_usage_chart(e.value))
+            update_usage_chart()
+
+    # ── Performance ──
+    if models:
+        with ui.row().classes("w-full gap-4"):
+            # Left: Latency by Model
+            with ui.card().classes("flex-1 p-2"):
+                ui.label("Latency by Model").classes("text-lg font-semibold px-2 pt-2")
+                model_names = [m["model"].replace("global.", "").replace("anthropic.", "").replace("meta.", "")[:25] for m in models[:15]]
+                avg_lat = [m.get("avg_latency_ms", 0) for m in models[:15]]
+                max_lat = [m.get("max_latency_ms", 0) for m in models[:15]]
+                min_lat = [m.get("min_latency_ms", 0) for m in models[:15]]
+                ui.echart({
+                    "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                    "legend": {"top": 0},
+                    "grid": {"top": 40, "bottom": 70, "left": 60, "right": 20},
+                    "xAxis": {"type": "category", "data": model_names, "axisLabel": {"rotate": 40, "interval": 0}},
+                    "yAxis": {"type": "value", "name": "ms"},
+                    "series": [
+                        {"name": "Min", "type": "bar", "data": min_lat, "itemStyle": {"color": "#10B981"}},
+                        {"name": "Avg", "type": "bar", "data": avg_lat, "itemStyle": {"color": "#E879F9", "opacity": 0.6}},
+                        {"name": "Max", "type": "bar", "data": max_lat, "itemStyle": {"color": "#8B5CF6"}},
+                    ],
+                }).classes("w-full h-80")
+
+            # Right: Latency Trend (per model)
+            if trend:
+                with ui.card().classes("flex-1 p-2"):
+                    model_options = {"TOTAL": "All Models"} | {f"MODEL#{m['model']}": m["model"] for m in models}
+
+                    with ui.row().classes("w-full items-center px-2 pt-2"):
+                        ui.label("Latency Trend").classes("text-lg font-semibold")
+                        ui.space()
+                        lat_model_select = ui.select(model_options, value="TOTAL").props("dense outlined").classes("w-48")
+
+                    lat_chart = ui.echart({
+                        "tooltip": {"trigger": "axis"},
+                        "legend": {"top": 0},
+                        "grid": {"top": 40, "bottom": 30, "left": 60, "right": 20},
+                        "xAxis": {"type": "category", "data": []},
+                        "yAxis": {"type": "value", "name": "ms"},
+                        "series": [],
+                    }).classes("w-full h-72")
+
+                    def update_latency_chart(dim="TOTAL"):
+                        t = data.get_trend(account_region, days, dim)
+                        lat_chart.options["xAxis"] = {"type": "category", "data": [x["period"] for x in t]}
+                        lat_chart.options["series"] = [
+                            {"name": "Min", "type": "line", "data": [x["min_latency_ms"] for x in t], "itemStyle": {"color": "#10B981"}, "smooth": True},
+                            {"name": "Avg", "type": "line", "data": [x["avg_latency_ms"] for x in t], "itemStyle": {"color": "#E879F9"}, "lineStyle": {"type": "dashed"}},
+                            {"name": "Max", "type": "line", "data": [x["max_latency_ms"] for x in t], "itemStyle": {"color": "#8B5CF6"}, "smooth": True},
+                        ]
+                        lat_chart.update()
+
+                    lat_model_select.on_value_change(lambda e: update_latency_chart(e.value))
+                    update_latency_chart()
 
 def summary_card(title: str, value: str, icon: str, color: str):
     with ui.card().classes("min-w-[150px] flex-1 p-6"):
