@@ -246,7 +246,7 @@ def handler(event, context):
 
         events.Rule(self, "WeeklyPricingSyncSchedule",
             rule_name=f"{id}-weekly-pricing-sync",
-            schedule=events.Schedule.cron(minute="0", hour="2", week_day="MON"),
+            schedule=events.Schedule.cron(minute="0", hour="21", week_day="SUN"),
             targets=[targets.LambdaFunction(sync_pricing_fn)],
         )
 

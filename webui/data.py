@@ -206,6 +206,26 @@ def save_pricing(model_id: str, input_per_1k: float, output_per_1k: float, effec
     })
 
 
+def get_pricing_history(model_id: str) -> list[dict]:
+    """Get all pricing records for a model, newest first."""
+    resp = _pricing.query(
+        KeyConditionExpression=Key("PK").eq(f"MODEL#{model_id}"),
+        ScanIndexForward=False,
+    )
+    return [{
+        "model_id": model_id,
+        "input_per_1k": float(item.get("input_per_1k", 0)),
+        "output_per_1k": float(item.get("output_per_1k", 0)),
+        "effective_date": item["SK"],
+        "source": item.get("source", ""),
+    } for item in resp.get("Items", [])]
+
+
+def delete_pricing(model_id: str, effective_date: str):
+    """Delete a pricing record."""
+    _pricing.delete_item(Key={"PK": f"MODEL#{model_id}", "SK": effective_date})
+
+
 def _format_item(item: dict, granularity: str) -> dict:
     """Convert DynamoDB item to clean dict."""
     sk = item["SK"]
